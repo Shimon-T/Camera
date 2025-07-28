@@ -5,18 +5,11 @@ import Combine
 import Vision
 
 @MainActor class CameraManager: NSObject, ObservableObject {
-    enum TimerPurpose {
-        case gestureHold
-        case captureDelay
-    }
-
     let objectWillChange = ObservableObjectPublisher()
-    @Published var showTimer: Bool = false
     @Published var isRecording: Bool = false
     @Published var timerCount: Int = 0
-    @Published var timerTotal: Int = 0
+    @Published var timerTotal: Int = 3
     @Published var recordingDuration: Int = 0
-    @Published var timerPurpose: TimerPurpose? = nil
     private var recordingTimer: Timer?
     private var isDetecting: Bool = false
     private var gestureLock: Bool = false
@@ -27,7 +20,6 @@ import Vision
     private var videoDeviceInput: AVCaptureDeviceInput!
     private let photoOutput = AVCapturePhotoOutput()
     private let movieOutput = AVCaptureMovieFileOutput()
-    private var timer: Timer?
     private let handPoseRequest = VNDetectHumanHandPoseRequest()
     private let videoOutput = AVCaptureVideoDataOutput()
     
@@ -69,63 +61,19 @@ import Vision
     }
     
     func startRecording(after delay: TimeInterval) {
-        timer?.invalidate()
         DispatchQueue.main.async {
-            self.timerTotal = Int(delay)
-            self.timerCount = Int(delay)
-            self.showTimer = true
-            self.timerPurpose = .captureDelay
-        }
-
-        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] t in
-            guard let self = self else { return }
-            if self.timerCount > 1 {
-                DispatchQueue.main.async {
-                    self.timerCount -= 1
-                }
-            } else {
-                t.invalidate()
-                self.timer = nil
-                DispatchQueue.main.async {
-                    self.showTimer = false
-                    self.timerCount = 0
-                    self.timerPurpose = nil
-                    self.isRecording = true
-                    self.recordingDuration = 0
-                    self.recordingTimer?.invalidate()
-                    self.recordingTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-                        DispatchQueue.main.async {
-                            self?.recordingDuration += 1
-                        }
-                    }
-                    self.startRecordingVideo()
-                }
-            }
-        }
-    }
-    
-    func stopTimerOrRecording() {
-        timer?.invalidate()
-        timer = nil
-        DispatchQueue.main.async {
-            self.showTimer = false
-            self.timerPurpose = nil
-            self.recordingTimer?.invalidate()
+            self.isRecording = true
             self.recordingDuration = 0
-            if self.isRecording {
-                self.stopRecordingVideo()
+            self.recordingTimer?.invalidate()
+            self.recordingTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+                DispatchQueue.main.async {
+                    self?.recordingDuration += 1
+                }
             }
-            self.isRecording = false
-            self.timerCount = 0
+            self.startRecordingVideo()
         }
     }
     
-    /// Triggers a 3-second countdown, then starts recording
-    func triggerCountdownAndCapture() {
-        startRecording(after: 3)
-    }
-    
-    /// Switches between front and back camera (not implemented)
     func switchCamera() {
         // TODO: Implement camera switching
     }
@@ -165,6 +113,46 @@ import Vision
         sessionQueue.async {
             self.isDetecting = true
         }
+    }
+
+    public func triggerCountdownAndCapture() {
+        // For now, just capture photo directly (no countdown)
+        capturePhoto()
+    }
+    
+    public func stopTimerOrRecording() {
+        if isRecording {
+            stopRecordingVideo()
+            isRecording = false
+        } else {
+            // No timer/recording to stop, do nothing or add more logic later if needed
+        }
+    }
+    
+    public func startTimer(total: Int = 3) {
+        DispatchQueue.main.async {
+            self.timerTotal = total
+            self.timerCount = total
+        }
+
+        Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
+            guard let self = self else {
+                timer.invalidate()
+                return
+            }
+            DispatchQueue.main.async {
+                if self.timerCount > 0 {
+                    self.timerCount -= 1
+                } else {
+                    self.timerCount = 0
+                    timer.invalidate()
+                }
+            }
+        }
+    }
+    
+    public func stopTimer() {
+        self.timerCount = 0
     }
 }
 
@@ -232,30 +220,29 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
                         self.gestureStartTime = now
                     } else if let start = self.gestureStartTime {
                         let elapsed = now.timeIntervalSince(start)
-                        self.timerCount = max(0, 2 - Int(elapsed))
-                        self.timerTotal = 2
-                        self.timerPurpose = .gestureHold
-                        self.showTimer = true
 
                         if elapsed >= 2.0 {
-                            self.showTimer = false
-                            self.timerCount = 0
-                            self.timerPurpose = nil
 
                             switch gesture {
                             case "fist":
                                 print("✊ グー検出")
-                                self.stopTimerOrRecording()
+                                self.timerTotal = 0
+                                self.timerCount = 0
+                                self.stopRecordingVideo()
+                                self.isRecording = false
                                 self.gestureLock = false
                             case "peace":
-                                print("✌️ ピース検出（5秒後に写真）")
+                                print("✌️ ピース検出（写真撮影）")
+                                self.timerTotal = 5
+                                self.timerCount = 5
                                 self.gestureLock = true
-                                self.capturePhotoWithDelay(seconds: 5)
+                                self.capturePhoto()
                             case "palm":
-                                print("🖐 パー検出（3秒後に録画）")
-                                self.gestureLock = true
+                                print("🖐 パー検出（録画開始）")
                                 self.timerTotal = 3
-                                self.startRecording(after: 3)
+                                self.timerCount = 3
+                                self.gestureLock = true
+                                self.startRecording(after: 0)
                             default:
                                 break
                             }
@@ -294,34 +281,6 @@ extension CameraManager: AVCapturePhotoCaptureDelegate {
 
 // MARK: - Photo capture helpers
 extension CameraManager {
-    func capturePhotoWithDelay(seconds: Int) {
-        timer?.invalidate()
-        DispatchQueue.main.async {
-            self.timerTotal = seconds
-            self.timerCount = seconds
-            self.showTimer = true
-            self.timerPurpose = .captureDelay
-        }
-
-        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] t in
-            guard let self = self else { return }
-            if self.timerCount > 1 {
-                DispatchQueue.main.async {
-                    self.timerCount -= 1
-                }
-            } else {
-                t.invalidate()
-                self.timer = nil
-                DispatchQueue.main.async {
-                    self.showTimer = false
-                    self.timerCount = 0
-                    self.timerPurpose = nil
-                    self.capturePhoto()
-                }
-            }
-        }
-    }
-
     private func capturePhoto() {
         let settings = AVCapturePhotoSettings()
         photoOutput.capturePhoto(with: settings, delegate: self)

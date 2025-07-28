@@ -8,7 +8,7 @@
 import SwiftUI
 
 struct CameraPreviewView: View {
-    @StateObject private var cameraManager = CameraManager()
+    @StateObject var cameraManager = CameraManager()
 
     var body: some View {
         ZStack {
@@ -16,15 +16,15 @@ struct CameraPreviewView: View {
             CameraView(session: cameraManager.session)
                 .ignoresSafeArea()
 
-            // 撮影用タイマー表示
-            if cameraManager.showTimer {
+            // タイマー
+            if cameraManager.timerCount > 0 {
                 CircularTimerComponent(
                     progress: 1.0 - Double(cameraManager.timerCount) / Double(max(cameraManager.timerTotal, 1)),
                     totalTime: cameraManager.timerTotal
                 )
                 .frame(width: 150, height: 150)
                 .position(x: UIScreen.main.bounds.width / 2, y: UIScreen.main.bounds.height / 2)
-                .zIndex(999)
+                .zIndex(998)
                 .transition(.scale)
             }
 
@@ -69,7 +69,6 @@ struct CameraPreviewView: View {
                 .padding(.bottom, 30)
             }
         }
-        .animation(.easeInOut, value: cameraManager.timerCount)
         .onAppear {
             cameraManager.startSession()
             cameraManager.startHandDetection()
