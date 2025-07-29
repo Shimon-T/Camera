@@ -73,5 +73,10 @@ struct CameraPreviewView: View {
             cameraManager.startSession()
             cameraManager.startHandDetection()
         }
+        .onChange(of: cameraManager.timerCount) { newValue in
+            if newValue > 0 {
+                print("⏳ タイマースタート: 残り \(newValue) 秒")
+            }
+        }
     }
 }
