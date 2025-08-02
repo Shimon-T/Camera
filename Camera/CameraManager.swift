@@ -185,6 +185,7 @@ class CameraManager: NSObject, ObservableObject {
     }
 }
 
+// MARK: - AVCaptureFileOutputRecordingDelegate
 extension CameraManager: AVCaptureFileOutputRecordingDelegate {
     func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL, from connections: [AVCaptureConnection], error: Error?) {
         if let error = error {
@@ -373,4 +374,3 @@ extension CameraManager {
         photoOutput.capturePhoto(with: settings, delegate: self)
     }
 }
-
