@@ -51,6 +51,7 @@ struct TimerTestView: View {
 struct CircularTimerComponent: View {
     var progress: Double
     var totalTime: Int
+    var color: Color = .blue
 
     var body: some View {
         ZStack {
@@ -62,7 +63,7 @@ struct CircularTimerComponent: View {
             Circle()
                 .trim(from: 0.0, to: CGFloat(min(progress, 1.0)))
                 .stroke(style: StrokeStyle(lineWidth: 12, lineCap: .round, lineJoin: .round))
-                .foregroundColor(.blue)
+                .foregroundColor(color)
                 .rotationEffect(Angle(degrees: -90))
 
             Text("\(Int(Double(totalTime) * (1.0 - progress)))")

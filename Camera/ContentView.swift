@@ -10,6 +10,7 @@ import SwiftUI
 struct ContentView: View {
     var body: some View {
 //        TimerTestView()
-        CameraPreviewView()
+        let cameraManager = CameraManager()
+        CameraPreviewView(cameraManager: cameraManager)
     }
 }

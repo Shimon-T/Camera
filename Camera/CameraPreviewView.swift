@@ -8,7 +8,9 @@
 import SwiftUI
 
 struct CameraPreviewView: View {
-    @StateObject var cameraManager = CameraManager()
+    @ObservedObject var cameraManager: CameraManager
+    @State private var smoothProgressTime: TimeInterval = 0.0
+    @State private var timer: Timer?
 
     var body: some View {
         ZStack {
@@ -17,15 +19,21 @@ struct CameraPreviewView: View {
                 .ignoresSafeArea()
 
             // タイマー
-            if cameraManager.timerCount > 0 {
+            if let purpose = cameraManager.timerPurpose {
+                let totalTime = 3.0
+                let elapsed = min(smoothProgressTime, totalTime)
+                let color: Color = elapsed < 1.5 ? .orange : .green
+                let displayProgress = min(elapsed / totalTime, 1.0)
                 CircularTimerComponent(
-                    progress: 1.0 - Double(cameraManager.timerCount) / Double(max(cameraManager.timerTotal, 1)),
-                    totalTime: cameraManager.timerTotal
+                    progress: displayProgress,
+                    totalTime: 3,
+                    color: color
                 )
                 .frame(width: 150, height: 150)
                 .position(x: UIScreen.main.bounds.width / 2, y: UIScreen.main.bounds.height / 2)
                 .zIndex(998)
                 .transition(.scale)
+                .animation(.easeInOut(duration: 0.1), value: cameraManager.timerCount)
             }
 
             // 録画中インジケーター
@@ -73,9 +81,32 @@ struct CameraPreviewView: View {
             cameraManager.startSession()
             cameraManager.startHandDetection()
         }
-        .onChange(of: cameraManager.timerCount) { newValue in
-            if newValue > 0 {
-                print("⏳ タイマースタート: 残り \(newValue) 秒")
+        .onDisappear {
+            timer?.invalidate()
+            timer = nil
+        }
+        .onChange(of: cameraManager.timerPurpose) { newValue in
+            timer?.invalidate()
+            timer = nil
+            if newValue != nil {
+                smoothProgressTime = 0.0
+                timer = Timer.scheduledTimer(withTimeInterval: 0.02, repeats: true) { _ in
+                    DispatchQueue.main.async {
+                        if smoothProgressTime < 3.0 {
+                            smoothProgressTime += 0.02
+                        } else {
+                            timer?.invalidate()
+                            timer = nil
+                        }
+                    }
+                }
+            }
+            if newValue == .gestureHold {
+                print("🟠 検出タイマー開始: 残り \(cameraManager.timerCount) 秒")
+            } else if newValue == .captureDelay {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    print("🟢 撮影タイマー開始: 残り \(cameraManager.timerCount) 秒")
+                }
             }
         }
     }
