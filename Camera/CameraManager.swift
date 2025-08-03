@@ -1,22 +1,28 @@
 import UIKit
 import AVFoundation
 import Photos
+import Observation
 import Combine
 import Vision
 
-@MainActor class CameraManager: NSObject, ObservableObject {
+@MainActor
+@Observable
+class CameraManager: NSObject, ObservableObject {
+    private var gestureFailureCount: Int = 0
+    private let maxGestureFailures: Int = 3
     enum TimerPurpose {
         case gestureHold
         case captureDelay
     }
-
+    
     let objectWillChange = ObservableObjectPublisher()
-    @Published var showTimer: Bool = false
-    @Published var isRecording: Bool = false
-    @Published var timerCount: Int = 0
-    @Published var timerTotal: Int = 0
-    @Published var recordingDuration: Int = 0
-    @Published var timerPurpose: TimerPurpose? = nil
+    public var showTimer: Bool = false
+    public var isRecording: Bool = false
+    public var timerCount: Int = 0
+    public var timerTotal: Int = 0
+    public var recordingDuration: Int = 0
+    public var timerPurpose: TimerPurpose? = nil
+    public var testNumber = 0
     private var recordingTimer: Timer?
     private var isDetecting: Bool = false
     private var gestureLock: Bool = false
@@ -27,7 +33,6 @@ import Vision
     private var videoDeviceInput: AVCaptureDeviceInput!
     private let photoOutput = AVCapturePhotoOutput()
     private let movieOutput = AVCaptureMovieFileOutput()
-    private var timer: Timer?
     private let handPoseRequest = VNDetectHumanHandPoseRequest()
     private let videoOutput = AVCaptureVideoDataOutput()
     
@@ -69,63 +74,19 @@ import Vision
     }
     
     func startRecording(after delay: TimeInterval) {
-        timer?.invalidate()
         DispatchQueue.main.async {
-            self.timerTotal = Int(delay)
-            self.timerCount = Int(delay)
-            self.showTimer = true
-            self.timerPurpose = .captureDelay
-        }
-
-        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] t in
-            guard let self = self else { return }
-            if self.timerCount > 1 {
-                DispatchQueue.main.async {
-                    self.timerCount -= 1
-                }
-            } else {
-                t.invalidate()
-                self.timer = nil
-                DispatchQueue.main.async {
-                    self.showTimer = false
-                    self.timerCount = 0
-                    self.timerPurpose = nil
-                    self.isRecording = true
-                    self.recordingDuration = 0
-                    self.recordingTimer?.invalidate()
-                    self.recordingTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-                        DispatchQueue.main.async {
-                            self?.recordingDuration += 1
-                        }
-                    }
-                    self.startRecordingVideo()
-                }
-            }
-        }
-    }
-    
-    func stopTimerOrRecording() {
-        timer?.invalidate()
-        timer = nil
-        DispatchQueue.main.async {
-            self.showTimer = false
-            self.timerPurpose = nil
-            self.recordingTimer?.invalidate()
+            self.isRecording = true
             self.recordingDuration = 0
-            if self.isRecording {
-                self.stopRecordingVideo()
+            self.recordingTimer?.invalidate()
+            self.recordingTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+                DispatchQueue.main.async {
+                    self?.recordingDuration += 1
+                }
             }
-            self.isRecording = false
-            self.timerCount = 0
+            self.startRecordingVideo()
         }
     }
     
-    /// Triggers a 3-second countdown, then starts recording
-    func triggerCountdownAndCapture() {
-        startRecording(after: 3)
-    }
-    
-    /// Switches between front and back camera (not implemented)
     func switchCamera() {
         // TODO: Implement camera switching
     }
@@ -166,8 +127,65 @@ import Vision
             self.isDetecting = true
         }
     }
+
+    public func triggerCountdownAndCapture() {
+        // For now, just capture photo directly (no countdown)
+        capturePhoto()
+    }
+    
+    public func stopTimerOrRecording() {
+        if isRecording {
+            stopRecordingVideo()
+            isRecording = false
+        } else {
+            // No timer/recording to stop, do nothing or add more logic later if needed
+        }
+    }
+    
+    public func startTimer(total: Int = 3) {
+        // Only set timerTotal and timerCount if timerPurpose is not nil or is already set for the same purpose
+        // (To avoid overwriting timerPurpose if already set)
+        if self.timerPurpose == nil || self.timerCount == 0 {
+            self.timerTotal = total
+            self.timerCount = total
+        }
+
+        print("▶️ タイマー開始: 合計 \(total) 秒")
+
+        Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
+            guard let self = self else {
+                timer.invalidate()
+                return
+            }
+
+            Task { @MainActor in
+                if self.timerCount > 0 {
+                    self.timerCount -= 1
+                    print("⏳ タイマー更新: 残り \(self.timerCount) 秒")
+                } else {
+                    self.timerCount = 0
+                    timer.invalidate()
+                    print("⏹️ タイマー終了")
+                }
+            }
+        }
+    }
+    
+    public func stopTimer() {
+        self.timerCount = 0
+    }
+    
+    private func resetGestureState() {
+        self.currentGesture = nil
+        self.gestureStartTime = nil
+        self.timerPurpose = nil
+        self.timerCount = 0
+        self.timerTotal = 0
+        self.gestureLock = false
+    }
 }
 
+// MARK: - AVCaptureFileOutputRecordingDelegate
 extension CameraManager: AVCaptureFileOutputRecordingDelegate {
     func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL, from connections: [AVCaptureConnection], error: Error?) {
         if let error = error {
@@ -187,7 +205,16 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
 
         do {
             try handler.perform([handPoseRequest])
-            guard let observation = handPoseRequest.results?.first else { return }
+            guard let observation = handPoseRequest.results?.first else {
+                // オレンジ（gestureHold＝ピース検知中）状態でピースが検知できなくなったら即刻中断し、タイマー非表示にする
+                if self.timerPurpose == .gestureHold {
+                    DispatchQueue.main.async {
+                        self.timerPurpose = nil
+                        self.resetGestureState()
+                    }
+                }
+                return
+            }
 
             if gestureLock {
                 let recognizedPoints = try observation.recognizedPoints(.all)
@@ -213,54 +240,102 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
             let middleTip = recognizedPoints[.middleTip]
 
             if let thumb = thumbTip, let index = indexTip, let middle = middleTip,
-               thumb.confidence > 0.3, index.confidence > 0.3, middle.confidence > 0.3 {
-                let distance = hypot(index.location.x - middle.location.x,
-                                     index.location.y - middle.location.y)
-
-                DispatchQueue.main.async {
-                    let gesture: String
-                    if distance < 0.05 {
-                        gesture = "fist"
-                    } else {
-                        let isPeace = abs(index.location.y - middle.location.y) > 0.1
-                        gesture = isPeace ? "peace" : "palm"
+               thumb.confidence > 0.2, index.confidence > 0.2, middle.confidence > 0.2 {
+                gestureFailureCount = 0  // reset failure count
+            } else {
+                gestureFailureCount += 1
+                if gestureFailureCount >= maxGestureFailures {
+                    DispatchQueue.main.async {
+                        self.timerPurpose = nil
+                        self.resetGestureState()
                     }
+                }
+                // ここもgestureHold中であれば即中断
+                if self.timerPurpose == .gestureHold {
+                    DispatchQueue.main.async {
+                        self.timerPurpose = nil
+                        self.resetGestureState()
+                    }
+                }
+                return
+            }
 
-                    let now = Date()
-                    if self.currentGesture != gesture {
-                        self.currentGesture = gesture
-                        self.gestureStartTime = now
-                    } else if let start = self.gestureStartTime {
-                        let elapsed = now.timeIntervalSince(start)
-                        self.timerCount = max(0, 2 - Int(elapsed))
-                        self.timerTotal = 2
-                        self.timerPurpose = .gestureHold
-                        self.showTimer = true
+            let distance = hypot(indexTip!.location.x - middleTip!.location.x,
+                                 indexTip!.location.y - middleTip!.location.y)
 
-                        if elapsed >= 2.0 {
-                            self.showTimer = false
-                            self.timerCount = 0
+            DispatchQueue.main.async {
+                let gesture: String
+                if distance < 0.05 {
+                    gesture = "fist"
+                } else {
+                    let isPeace = abs(indexTip!.location.y - middleTip!.location.y) > 0.1
+                    gesture = isPeace ? "peace" : "palm"
+                }
+
+                let now = Date()
+                if self.currentGesture != gesture {
+                    self.currentGesture = gesture
+                    self.gestureStartTime = now
+                } else if let start = self.gestureStartTime {
+                    let elapsed = now.timeIntervalSince(start)
+
+                    if elapsed >= 2.0 {
+                        // Added: If timerPurpose == .captureDelay and gesture is fist, cancel timer and reset state immediately
+                        if gesture == "fist" && self.timerPurpose == .captureDelay {
                             self.timerPurpose = nil
+                            self.resetGestureState()
+                            return
+                        }
 
-                            switch gesture {
-                            case "fist":
-                                print("✊ グー検出")
-                                self.stopTimerOrRecording()
-                                self.gestureLock = false
-                            case "peace":
-                                print("✌️ ピース検出（5秒後に写真）")
-                                self.gestureLock = true
-                                self.capturePhotoWithDelay(seconds: 5)
-                            case "palm":
-                                print("🖐 パー検出（3秒後に録画）")
-                                self.gestureLock = true
-                                self.timerTotal = 3
-                                self.startRecording(after: 3)
-                            default:
-                                break
+                        switch gesture {
+                        case "fist":
+                            // If timerPurpose is gestureHold or captureDelay, cancel immediately
+                            if self.timerPurpose == .gestureHold || self.timerPurpose == .captureDelay {
+                                self.timerPurpose = nil
+                                self.resetGestureState()
+                                return
                             }
-                            self.currentGesture = nil
-                            self.gestureStartTime = nil
+                            print("✊ グー検出")
+                            self.timerTotal = 0
+                            self.timerCount = 0
+                            self.stopRecordingVideo()
+                            self.isRecording = false
+                            self.resetGestureState()
+                        case "peace":
+                            print("✌️ ピース検出（写真撮影）")
+                            self.timerPurpose = .gestureHold
+                            self.startTimer(total: 2) // UI表示は2秒に見せる
+                            self.gestureLock = true
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                                self.timerPurpose = .captureDelay
+                                self.startTimer(total: 3) // for capture countdown
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                                    self.capturePhoto()
+                                    self.timerPurpose = nil
+                                    self.timerCount = 0
+                                    self.timerTotal = 0
+                                    self.resetGestureState()
+                                }
+                            }
+                        case "palm":
+                            print("🖐 パー検出（録画開始）")
+                            self.timerPurpose = .gestureHold
+                            self.startTimer(total: 2) // UI表示は2秒に見せる
+                            self.gestureLock = true
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                                self.timerPurpose = .captureDelay
+                                self.startTimer(total: 3)
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                                    self.startRecording(after: 0)
+                                    self.timerPurpose = nil
+                                    self.timerCount = 0
+                                    self.timerTotal = 0
+                                    self.resetGestureState()
+                                }
+                            }
+                        default:
+                            self.resetGestureState()
+                            break
                         }
                     }
                 }
@@ -294,34 +369,6 @@ extension CameraManager: AVCapturePhotoCaptureDelegate {
 
 // MARK: - Photo capture helpers
 extension CameraManager {
-    func capturePhotoWithDelay(seconds: Int) {
-        timer?.invalidate()
-        DispatchQueue.main.async {
-            self.timerTotal = seconds
-            self.timerCount = seconds
-            self.showTimer = true
-            self.timerPurpose = .captureDelay
-        }
-
-        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] t in
-            guard let self = self else { return }
-            if self.timerCount > 1 {
-                DispatchQueue.main.async {
-                    self.timerCount -= 1
-                }
-            } else {
-                t.invalidate()
-                self.timer = nil
-                DispatchQueue.main.async {
-                    self.showTimer = false
-                    self.timerCount = 0
-                    self.timerPurpose = nil
-                    self.capturePhoto()
-                }
-            }
-        }
-    }
-
     private func capturePhoto() {
         let settings = AVCapturePhotoSettings()
         photoOutput.capturePhoto(with: settings, delegate: self)
