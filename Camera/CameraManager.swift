@@ -28,6 +28,7 @@ class CameraManager: NSObject, ObservableObject {
     private var gestureLock: Bool = false
     private var gestureStartTime: Date?
     private var currentGesture: String?
+    private var scheduledCaptureTask: DispatchWorkItem?
     let session = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "session queue")
     private var videoDeviceInput: AVCaptureDeviceInput!
@@ -182,6 +183,8 @@ class CameraManager: NSObject, ObservableObject {
         self.timerCount = 0
         self.timerTotal = 0
         self.gestureLock = false
+        self.scheduledCaptureTask?.cancel()
+        self.scheduledCaptureTask = nil
     }
 }
 
@@ -198,151 +201,220 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
 
 extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
-        guard isDetecting,
-              let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-
-        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up, options: [:])
-
+        guard let pixelBuffer = validateAndGetPixelBuffer(from: sampleBuffer) else { return }
+        
         do {
-            try handler.perform([handPoseRequest])
-            guard let observation = handPoseRequest.results?.first else {
-                // オレンジ（gestureHold＝ピース検知中）状態でピースが検知できなくなったら即刻中断し、タイマー非表示にする
-                if self.timerPurpose == .gestureHold {
-                    DispatchQueue.main.async {
-                        self.timerPurpose = nil
-                        self.resetGestureState()
-                    }
-                }
+            let observation = try performHandPoseDetection(on: pixelBuffer)
+            
+            guard let handObservation = observation else {
+                handleNoHandDetected()
                 return
             }
-
+            
             if gestureLock {
-                let recognizedPoints = try observation.recognizedPoints(.all)
-                let thumbTip = recognizedPoints[.thumbTip]
-                let indexTip = recognizedPoints[.indexTip]
-                let middleTip = recognizedPoints[.middleTip]
-                if let thumb = thumbTip, let index = indexTip, let middle = middleTip,
-                   thumb.confidence > 0.3, index.confidence > 0.3, middle.confidence > 0.3 {
-                    let distance = hypot(index.location.x - middle.location.x,
-                                         index.location.y - middle.location.y)
-                    let isFist = distance < 0.05
-                    if !isFist { return }
-                } else {
-                    return
-                }
+                guard validateGestureLockState(with: handObservation) else { return }
             }
-
-            let recognizedPoints = try observation.recognizedPoints(.all)
-
-            // Simple heuristic for detecting hand openness (e.g., open palm vs closed fist)
-            let thumbTip = recognizedPoints[.thumbTip]
-            let indexTip = recognizedPoints[.indexTip]
-            let middleTip = recognizedPoints[.middleTip]
-
-            if let thumb = thumbTip, let index = indexTip, let middle = middleTip,
-               thumb.confidence > 0.2, index.confidence > 0.2, middle.confidence > 0.2 {
-                gestureFailureCount = 0  // reset failure count
-            } else {
-                gestureFailureCount += 1
-                if gestureFailureCount >= maxGestureFailures {
-                    DispatchQueue.main.async {
-                        self.timerPurpose = nil
-                        self.resetGestureState()
-                    }
-                }
-                // ここもgestureHold中であれば即中断
-                if self.timerPurpose == .gestureHold {
-                    DispatchQueue.main.async {
-                        self.timerPurpose = nil
-                        self.resetGestureState()
-                    }
-                }
+            
+            guard let handPoints = validateHandConfidence(from: handObservation) else {
+                handleLowConfidenceDetection()
                 return
             }
-
-            let distance = hypot(indexTip!.location.x - middleTip!.location.x,
-                                 indexTip!.location.y - middleTip!.location.y)
-
-            DispatchQueue.main.async {
-                let gesture: String
-                if distance < 0.05 {
-                    gesture = "fist"
-                } else {
-                    let isPeace = abs(indexTip!.location.y - middleTip!.location.y) > 0.1
-                    gesture = isPeace ? "peace" : "palm"
-                }
-
-                let now = Date()
-                if self.currentGesture != gesture {
-                    self.currentGesture = gesture
-                    self.gestureStartTime = now
-                } else if let start = self.gestureStartTime {
-                    let elapsed = now.timeIntervalSince(start)
-
-                    if elapsed >= 2.0 {
-                        // Added: If timerPurpose == .captureDelay and gesture is fist, cancel timer and reset state immediately
-                        if gesture == "fist" && self.timerPurpose == .captureDelay {
-                            self.timerPurpose = nil
-                            self.resetGestureState()
-                            return
-                        }
-
-                        switch gesture {
-                        case "fist":
-                            // If timerPurpose is gestureHold or captureDelay, cancel immediately
-                            if self.timerPurpose == .gestureHold || self.timerPurpose == .captureDelay {
-                                self.timerPurpose = nil
-                                self.resetGestureState()
-                                return
-                            }
-                            print("✊ グー検出")
-                            self.timerTotal = 0
-                            self.timerCount = 0
-                            self.stopRecordingVideo()
-                            self.isRecording = false
-                            self.resetGestureState()
-                        case "peace":
-                            print("✌️ ピース検出（写真撮影）")
-                            self.timerPurpose = .gestureHold
-                            self.startTimer(total: 2) // UI表示は2秒に見せる
-                            self.gestureLock = true
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                                self.timerPurpose = .captureDelay
-                                self.startTimer(total: 3) // for capture countdown
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                                    self.capturePhoto()
-                                    self.timerPurpose = nil
-                                    self.timerCount = 0
-                                    self.timerTotal = 0
-                                    self.resetGestureState()
-                                }
-                            }
-                        case "palm":
-                            print("🖐 パー検出（録画開始）")
-                            self.timerPurpose = .gestureHold
-                            self.startTimer(total: 2) // UI表示は2秒に見せる
-                            self.gestureLock = true
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                                self.timerPurpose = .captureDelay
-                                self.startTimer(total: 3)
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                                    self.startRecording(after: 0)
-                                    self.timerPurpose = nil
-                                    self.timerCount = 0
-                                    self.timerTotal = 0
-                                    self.resetGestureState()
-                                }
-                            }
-                        default:
-                            self.resetGestureState()
-                            break
-                        }
-                    }
-                }
-            }
+            
+            let gesture = classifyGesture(from: handPoints)
+            processGestureWithTiming(gesture)
+            
         } catch {
             print("❌ Vision error: \(error)")
         }
+    }
+    
+    private func validateAndGetPixelBuffer(from sampleBuffer: CMSampleBuffer) -> CVPixelBuffer? {
+        guard isDetecting,
+              let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return nil }
+        return pixelBuffer
+    }
+    
+    private func performHandPoseDetection(on pixelBuffer: CVPixelBuffer) throws -> VNHumanHandPoseObservation? {
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up, options: [:])
+        try handler.perform([handPoseRequest])
+        return handPoseRequest.results?.first
+    }
+    
+    private func handleNoHandDetected() {
+        if self.timerPurpose == .gestureHold {
+            DispatchQueue.main.async {
+                self.timerPurpose = nil
+                self.resetGestureState()
+            }
+        }
+    }
+    
+    private func validateGestureLockState(with observation: VNHumanHandPoseObservation) -> Bool {
+        do {
+            let recognizedPoints = try observation.recognizedPoints(.all)
+            let thumbTip = recognizedPoints[.thumbTip]
+            let indexTip = recognizedPoints[.indexTip]
+            let middleTip = recognizedPoints[.middleTip]
+            
+            if let thumb = thumbTip, let index = indexTip, let middle = middleTip,
+               thumb.confidence > 0.3, index.confidence > 0.3, middle.confidence > 0.3 {
+                let distance = hypot(index.location.x - middle.location.x,
+                                     index.location.y - middle.location.y)
+                return distance < 0.05 // fistのみ許可
+            }
+            return false
+        } catch {
+            return false
+        }
+    }
+    
+    private func validateHandConfidence(from observation: VNHumanHandPoseObservation) -> (thumb: VNRecognizedPoint, index: VNRecognizedPoint, middle: VNRecognizedPoint)? {
+        do {
+            let recognizedPoints = try observation.recognizedPoints(.all)
+            let thumbTip = recognizedPoints[.thumbTip]
+            let indexTip = recognizedPoints[.indexTip]
+            let middleTip = recognizedPoints[.middleTip]
+            
+            if let thumb = thumbTip, let index = indexTip, let middle = middleTip,
+               thumb.confidence > 0.2, index.confidence > 0.2, middle.confidence > 0.2 {
+                gestureFailureCount = 0
+                return (thumb: thumb, index: index, middle: middle)
+            }
+            return nil
+        } catch {
+            return nil
+        }
+    }
+    
+    private func handleLowConfidenceDetection() {
+        gestureFailureCount += 1
+        if gestureFailureCount >= maxGestureFailures {
+            DispatchQueue.main.async {
+                self.timerPurpose = nil
+                self.resetGestureState()
+            }
+        }
+        
+        if self.timerPurpose == .gestureHold {
+            DispatchQueue.main.async {
+                self.timerPurpose = nil
+                self.resetGestureState()
+            }
+        }
+    }
+    
+    private func classifyGesture(from handPoints: (thumb: VNRecognizedPoint, index: VNRecognizedPoint, middle: VNRecognizedPoint)) -> String {
+        let distance = hypot(handPoints.index.location.x - handPoints.middle.location.x,
+                             handPoints.index.location.y - handPoints.middle.location.y)
+        
+        if distance < 0.05 {
+            return "fist"
+        } else {
+            let isPeace = abs(handPoints.index.location.y - handPoints.middle.location.y) > 0.1
+            return isPeace ? "peace" : "palm"
+        }
+    }
+    
+    private func processGestureWithTiming(_ gesture: String) {
+        DispatchQueue.main.async {
+            let now = Date()
+            
+            if self.currentGesture != gesture {
+                self.currentGesture = gesture
+                self.gestureStartTime = now
+            } else if let start = self.gestureStartTime {
+                let elapsed = now.timeIntervalSince(start)
+                
+                if elapsed >= 2.0 {
+                    self.executeGestureAction(gesture)
+                }
+            }
+        }
+    }
+    
+    private func executeGestureAction(_ gesture: String) {
+        if gesture == "fist" && self.timerPurpose == .captureDelay {
+            self.cancelCurrentTimer()
+            return
+        }
+        
+        switch gesture {
+        case "fist":
+            self.handleFistGesture()
+        case "peace":
+            self.handlePeaceGesture()
+        case "palm":
+            self.handlePalmGesture()
+        default:
+            self.resetGestureState()
+        }
+    }
+    
+    private func cancelCurrentTimer() {
+        self.timerPurpose = nil
+        self.resetGestureState()
+    }
+    
+    private func handleFistGesture() {
+        if self.timerPurpose == .gestureHold || self.timerPurpose == .captureDelay {
+            self.cancelCurrentTimer()
+            return
+        }
+        
+        print("✊ グー検出")
+        self.timerTotal = 0
+        self.timerCount = 0
+        self.stopRecordingVideo()
+        self.isRecording = false
+        self.resetGestureState()
+    }
+    
+    private func handlePeaceGesture() {
+        print("✌️ ピース検出（写真撮影）")
+        self.startGestureSequence { [weak self] in
+            self?.capturePhoto()
+        }
+    }
+    
+    private func handlePalmGesture() {
+        print("🖐 パー検出（録画開始）")
+        self.startGestureSequence { [weak self] in
+            self?.startRecording(after: 0)
+        }
+    }
+    
+    private func startGestureSequence(completion: @escaping () -> Void) {
+        // 既存のタスクをキャンセル
+        scheduledCaptureTask?.cancel()
+        
+        self.timerPurpose = .gestureHold
+        self.startTimer(total: 2)
+        self.gestureLock = true
+        
+        // 1.5秒後にcaptureDelayフェーズに移行
+        let delayTask = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            self.timerPurpose = .captureDelay
+            self.startTimer(total: 3)
+            
+            // 3秒後に実際の撮影/録画を実行
+            let captureTask = DispatchWorkItem { [weak self] in
+                guard let self = self else { return }
+                // タスクがキャンセルされていないかチェック
+                if !(self.scheduledCaptureTask?.isCancelled ?? true) {
+                    completion()
+                    self.timerPurpose = nil
+                    self.timerCount = 0
+                    self.timerTotal = 0
+                    self.resetGestureState()
+                }
+            }
+            
+            self.scheduledCaptureTask = captureTask
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0, execute: captureTask)
+        }
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: delayTask)
     }
 }
 
