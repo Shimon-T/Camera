@@ -11,31 +11,55 @@ struct CameraPreviewView: View {
     @ObservedObject var cameraManager: CameraManager
     @State private var smoothProgressTime: TimeInterval = 0.0
     @State private var timer: Timer?
-
+    
     var body: some View {
+        let timerOverlayOpacity = (cameraManager.timerPurpose == .gestureHold || cameraManager.timerPurpose == .captureDelay) ? 1.0 : 0.0
+        
         ZStack {
-            // カメラ映像の表示
+            // カメラ映像の表示 with hand landmarks overlay
             CameraView(session: cameraManager.session)
                 .ignoresSafeArea()
-
-            // タイマー
-            if let purpose = cameraManager.timerPurpose {
-                let totalTime = 3.0
-                let elapsed = min(smoothProgressTime, totalTime)
-                let color: Color = elapsed < 1.5 ? .orange : .green
-                let displayProgress = min(elapsed / totalTime, 1.0)
-                CircularTimerComponent(
-                    progress: displayProgress,
-                    totalTime: 3,
-                    color: color
+                .overlay(
+                    GeometryReader { geo in
+                        ZStack {
+                            ForEach(cameraManager.handLandmarks.indices, id: \.self) { index in
+                                let point = cameraManager.handLandmarks[index]
+                                Circle()
+                                    .fill(Color.red)
+                                    .frame(width: 10, height: 10)
+                                    .position(
+                                        x: point.x * geo.size.width,
+                                        y: (1 - point.y) * geo.size.height
+                                    )
+                            }
+                        }
+                    }
                 )
-                .frame(width: 150, height: 150)
-                .position(x: UIScreen.main.bounds.width / 2, y: UIScreen.main.bounds.height / 2)
-                .zIndex(998)
-                .transition(.scale)
-                .animation(.easeInOut(duration: 0.1), value: cameraManager.timerCount)
+            
+            // カメラ画面中央上部にcurrentGesture表示
+            if let gesture = cameraManager.currentGesture {
+                Text(gesture)
+                    .font(.system(size: 36, weight: .bold))
+                    .foregroundColor(.white)
+                    .shadow(radius: 4)
+                    .position(x: UIScreen.main.bounds.width / 2, y: 80)
+                    .zIndex(999)
             }
-
+            
+            // カウントダウン関連デバッグプリント
+            Text("") // Dummy invisible view to prevent view builder error
+                .onAppear {
+                    print("[View] isCountdownActive before if: \(cameraManager.isCountdownActive)")
+                }
+            
+            // カウントダウン表示
+            if cameraManager.isCountdownActive {
+                CountdownNumberView()
+                    .onAppear {
+                        print("[View] CountdownNumberView appeared")
+                    }
+            }
+            
             // 録画中インジケーター
             if cameraManager.isRecording {
                 VStack {
@@ -56,13 +80,14 @@ struct CameraPreviewView: View {
                 .padding(.top, 50)
                 .padding(.horizontal)
             }
-
+            
             // テスト用の手動操作ボタン
             VStack {
                 Spacer()
                 HStack(spacing: 20) {
                     Button("📸 撮影開始（テスト）") {
-                        cameraManager.triggerCountdownAndCapture()
+                        print("[TEST] テストボタンが押されました")
+                        cameraManager.takePhoto()
                     }
                     Button("🔄 カメラ切替") {
                         cameraManager.switchCamera()
@@ -70,6 +95,7 @@ struct CameraPreviewView: View {
                     Button("🛑 停止") {
                         cameraManager.stopTimerOrRecording()
                     }
+                    
                 }
                 .padding()
                 .background(Color.white.opacity(0.9))
@@ -77,15 +103,16 @@ struct CameraPreviewView: View {
                 .padding(.bottom, 30)
             }
         }
+        .animation(.spring(), value: cameraManager.timerPurpose)
         .onAppear {
             cameraManager.startSession()
-            cameraManager.startHandDetection()
         }
         .onDisappear {
             timer?.invalidate()
             timer = nil
         }
         .onChange(of: cameraManager.timerPurpose) { newValue in
+            print("[DEBUG] timerPurpose が変更されました: ", newValue as Any)
             timer?.invalidate()
             timer = nil
             if newValue != nil {
@@ -103,10 +130,12 @@ struct CameraPreviewView: View {
             }
             if newValue == .gestureHold {
                 print("🟠 検出タイマー開始: 残り \(cameraManager.timerCount) 秒")
+                print("[DEBUG] ピース検知時のタイマーopacity =", timerOverlayOpacity)
             } else if newValue == .captureDelay {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                     print("🟢 撮影タイマー開始: 残り \(cameraManager.timerCount) 秒")
                 }
+                print("[DEBUG] シャッター時のタイマーopacity =", timerOverlayOpacity)
             }
         }
     }
