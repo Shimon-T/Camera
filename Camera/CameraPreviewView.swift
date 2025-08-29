@@ -124,4 +124,3 @@ struct CameraPreviewView: View {
         }
     }
 }
-

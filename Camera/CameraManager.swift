@@ -25,11 +25,17 @@ class CameraManager: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleB
     
     @Published var currentGesture: Gesture? = .none
     @Published var isCountdownActive: Bool = false  // カウントダウン中フラグ
-    
+
+    // Added for gesture hold countdown tracking
+    @Published var isGestureHoldTimerActive: Bool = false
 
     private let photoOutput = AVCapturePhotoOutput()
 
     private var captureDelayTimer: Timer? = nil
+
+    // Added private properties for gesture hold countdown
+    private var gestureHoldTimer: Timer? = nil
+    private var gestureHoldCountdown: Int = 3
 
     func startCaptureCountdown() {
         self.isCountdownActive = true
@@ -99,7 +105,7 @@ class CameraManager: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleB
     deinit {
         NotificationCenter.default.removeObserver(self, name: UIDevice.orientationDidChangeNotification, object: nil)
         captureDelayTimer?.invalidate()
-        gestureTimer?.invalidate()
+        gestureHoldTimer?.invalidate()
     }
 
     func stopTimerOrRecording() {
@@ -122,14 +128,11 @@ class CameraManager: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleB
 
     private let handPoseRequest = VNDetectHumanHandPoseRequest()
 
-    // === New properties for gesture processing ===
+    // === Removed old gesture timer properties and logic replaced by gestureHoldTimer ===
     private var lastGesture: Gesture? = .none
     private var lastGestureDate: Date? = nil
     private let gestureCooldown: TimeInterval = 2.0
 
-    private var gestureTimer: Timer? = nil
-    private var gestureTimerStart: Date? = nil
-    private var gestureTimerDuration: TimeInterval = 0
 
     private func flashTorch(duration: TimeInterval) {
         // Turn on torch
@@ -250,7 +253,9 @@ class CameraManager: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleB
                     self.handBoundingBox = nil
                     self.handLandmarks = []
                     self.currentGesture = nil
-                    self.resetGestureTimers()
+                    // Cancel gesture hold countdown on no gesture recognized
+                    // Removed cancellation per instruction
+                    // self.cancelGestureHoldCountdown()
                 }
                 return
             }
@@ -261,7 +266,9 @@ class CameraManager: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleB
                     self.handBoundingBox = nil
                     self.handLandmarks = []
                     self.currentGesture = nil
-                    self.resetGestureTimers()
+                    // Cancel gesture hold countdown on low confidence
+                    // Removed cancellation per instruction
+                    // self.cancelGestureHoldCountdown()
                 }
                 return
             }
@@ -297,11 +304,17 @@ class CameraManager: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleB
                 // Classify gesture
                 let recognizedGesture = self.classifyGesture(observation: observation)
 
-                // If same gesture and cooldown not passed, ignore
+                // If same gesture and cooldown not passed, ignore (except for peace hold timer management)
                 let now = Date()
                 if let last = self.lastGesture, last == recognizedGesture,
                    let lastDate = self.lastGestureDate,
                    now.timeIntervalSince(lastDate) < self.gestureCooldown {
+                    // Even if cooldown, we must handle peace gesture hold timer
+                    if recognizedGesture == .peace {
+                        if !self.isGestureHoldTimerActive {
+                            self.startGestureHoldCountdown()
+                        }
+                    }
                     return
                 }
 
@@ -312,7 +325,7 @@ class CameraManager: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleB
                     self.processGestureWithTiming(gesture)
                 } else {
                     self.currentGesture = nil
-                    self.resetGestureTimers()
+                    // Removed cancelGestureHoldCountdown() here per instruction
                 }
             }
         } catch {
@@ -373,6 +386,8 @@ class CameraManager: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleB
             let ringExt = isExtended(ringDist)
             let littleExt = isExtended(littleDist)
 
+            // Old logic commented out:
+            /*
             // peace: index and middle extended only (Changed: other fingers no longer matter)
             if indexExt && middleExt {
                 return .peace
@@ -386,116 +401,157 @@ class CameraManager: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleB
                 return .fist
             }
             return .none
+            */
+            
+            // New stricter logic:
+            // Fist: all fingers NOT extended
+            if !thumbExt && !indexExt && !middleExt && !ringExt && !littleExt {
+                return .fist
+            }
+            // Peace: index and middle extended, other fingers NOT extended
+            if indexExt && middleExt && !thumbExt && !ringExt && !littleExt {
+                return .peace
+            }
+            // Open: all fingers extended
+            if thumbExt && indexExt && middleExt && ringExt && littleExt {
+                return .open
+            }
+            return .none
         } catch {
             return .none
         }
     }
     
     private func detectPeace() {
-        DispatchQueue.main.async {
-            self.timerPurpose = .gestureHold
-            self.timerCount = 3
-            self.gestureTimerDuration = 3.0
-        }
-        print("🟣 ピース検知: timerPurpose直後: \(String(describing: timerPurpose)), timerCount: \(timerCount)")
-        self.startCaptureCountdown()
+        // Removed because startGestureHoldCountdown handles peace countdown.
     }
     
     private func detectOpen() {
         DispatchQueue.main.async {
             self.timerPurpose = .gestureHold
-            self.timerCount = 3
-            self.gestureTimerDuration = 3.0
+            self.gestureHoldCountdown = 3
+            self.timerCount = self.gestureHoldCountdown
         }
     }
     
     private func detectFist() {
         isRecording = false
         print("録画停止")
-        resetGestureTimers()
+        cancelGestureHoldCountdown()
         timerPurpose = nil
     }
 
     // Process gesture with timer-based hold detection
     private func processGestureWithTiming(_ gesture: Gesture) {
-        // If a different gesture is detected while a timer is running, reset
+        // If a different gesture is detected, handle timers appropriately
         if currentGesture != gesture {
-            if gesture == .peace {
-                print("🟣 ピースを検知しました（初検出）")
-            }
-            print("🟣 ピース検知: timerPurposeセット前: \(String(describing: timerPurpose))")
             resetGestureTimers()
-            gestureTimerStart = Date()
+            // Handle peace gesture with new hold countdown timer
+            if gesture == .peace {
+                if !isGestureHoldTimerActive {
+                    startGestureHoldCountdown()
+                }
+            } else {
+                // Cancel peace gesture hold countdown if not peace
+                cancelGestureHoldCountdown()
+            }
+            
+            // Handle other gestures
             switch gesture {
-            case .peace:
-                detectPeace()
             case .open:
                 detectOpen()
             case .fist:
                 detectFist()
+                currentGesture = gesture
                 return
             default:
-                gestureTimerDuration = 0
+                break
             }
         }
 
         currentGesture = gesture
         
-        // If gesture is fist and recording is active, stop recording immediately
-        //        if gesture == .fist && isRecording {
-        //
-        //            return
-        //        }
-        
         // If gesture is open and not recording, start recording immediately after hold
-        if (gesture == .open || gesture == .peace) {
-            guard gestureTimer == nil else { return }
-            // Start timer to wait gestureTimerDuration seconds
-            gestureTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] timer in
+        if gesture == .open {
+            guard gestureHoldTimer == nil else { return }
+            // Start timer to wait gestureHoldCountdown seconds (reuse gestureHoldTimer for open)
+            gestureHoldTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] timer in
                 guard let self = self else {
                     timer.invalidate()
                     return
                 }
                 Task { @MainActor in
-                    guard let start = self.gestureTimerStart else {
+                    guard let start = self.gestureHoldTimerStart else {
                         timer.invalidate()
                         return
                     }
                     let elapsed = Date().timeIntervalSince(start)
-                    let remaining = Int(ceil(self.gestureTimerDuration - elapsed))
-                    // Removed print statement here as per instruction
+                    let remaining = Int(ceil(Double(self.gestureHoldCountdown) - elapsed))
                     DispatchQueue.main.async {
                         self.timerCount = max(0, remaining)
                     }
-                    if elapsed >= self.gestureTimerDuration {
+                    if elapsed >= Double(self.gestureHoldCountdown) {
                         timer.invalidate()
-                        print("🟣 gestureTimer invalidated: elapsed=\(elapsed), timerPurpose=\(String(describing: self.timerPurpose))")
+                        print("🟣 gestureHoldTimer invalidated: elapsed=\(elapsed), timerPurpose=\(String(describing: self.timerPurpose))")
                         DispatchQueue.main.async {
                             self.timerPurpose = nil
                         }
-                        
-                        if gesture == .peace {
-                            print("ピース判定でシャッターを切ります")
-                            //                            self.startCaptureCountdown()
-                        } else if gesture == .open {
-                            if !self.isRecording {
-                                self.isRecording = true
-                                print("録画開始")
-                            }
+                        if !self.isRecording {
+                            self.isRecording = true
+                            print("録画開始")
                         }
-                        self.resetGestureTimers()
+                        self.cancelGestureHoldCountdown()
                     }
+                }
+            }
+            gestureHoldTimerStart = Date()
+        }
+    }
+
+    // Reset old gesture timers (not used for peace gesture now)
+    private func resetGestureTimers() {
+        timerPurpose = nil
+        timerCount = 3
+    }
+
+    // MARK: - New gesture hold countdown methods
+    
+    private var gestureHoldTimerStart: Date? = nil
+    
+    /// Start the gesture hold countdown for peace gesture, separate from captureDelayTimer
+    private func startGestureHoldCountdown() {
+        cancelGestureHoldCountdown()
+        isGestureHoldTimerActive = true
+        gestureHoldCountdown = 3
+        timerPurpose = .gestureHold
+        timerCount = gestureHoldCountdown
+        gestureHoldTimerStart = Date()
+        print("[GestureHold] タイマースタート")
+        gestureHoldTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
+            guard let self = self else { timer.invalidate(); return }
+            Task { @MainActor in
+                self.gestureHoldCountdown -= 1
+                self.timerCount = self.gestureHoldCountdown
+                if self.gestureHoldCountdown <= 0 {
+                    timer.invalidate()
+                    self.isGestureHoldTimerActive = false
+                    self.gestureHoldTimer = nil
+                    self.timerPurpose = nil
+                    self.takePhoto()
                 }
             }
         }
     }
-
-    private func resetGestureTimers() {
-        gestureTimer?.invalidate()
-        gestureTimer = nil
-        gestureTimerStart = nil
+    
+    /// Cancel and reset the gesture hold countdown timer for peace gesture
+    private func cancelGestureHoldCountdown() {
+        gestureHoldTimer?.invalidate()
+        gestureHoldTimer = nil
+        isGestureHoldTimerActive = false
         timerPurpose = nil
-        timerCount = 3
+        // Commented out to keep the last timerCount visible
+        // timerCount = 3
+        gestureHoldTimerStart = nil
     }
 
     // Existing photo capture delegate method, unchanged
@@ -528,3 +584,4 @@ class CameraManager: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleB
         }
     }
 }
+
