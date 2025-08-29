@@ -11,7 +11,9 @@ enum TimerPurpose {
     case captureDelay
 }
 
-
+enum HandGesture: String, CaseIterable, Equatable {
+    case peace, open, fist
+}
 
 @MainActor
 class CameraManager: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleBufferDelegate, AVCapturePhotoCaptureDelegate {
@@ -23,7 +25,8 @@ class CameraManager: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleB
            print("[DEBUG] CameraManager instance created: \(Unmanaged.passUnretained(self).toOpaque())")
        }
     
-    @Published var currentGesture: String? = nil
+    @Published var currentGesture: HandGesture? = nil
+    @Published var currentGestureName: String? = nil
     @Published var isCountdownActive: Bool = false  // カウントダウン中フラグ
     
 
@@ -44,12 +47,14 @@ class CameraManager: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleB
                 timer.invalidate()
                 return
             }
-            self.timerCount -= 1
-            if self.timerCount <= 0 {
-                timer.invalidate()
-                self.captureDelayTimer = nil
-                self.isCountdownActive = false
-                self.takePhoto()
+            Task { @MainActor in
+                self.timerCount -= 1
+                if self.timerCount <= 0 {
+                    timer.invalidate()
+                    self.captureDelayTimer = nil
+                    self.isCountdownActive = false
+                    self.takePhoto()
+                }
             }
         }
     }
@@ -120,14 +125,13 @@ class CameraManager: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleB
     private let handPoseRequest = VNDetectHumanHandPoseRequest()
 
     // === New properties for gesture processing ===
-    private var lastGesture: String? = nil
+    private var lastGesture: HandGesture? = nil
     private var lastGestureDate: Date? = nil
     private let gestureCooldown: TimeInterval = 2.0
 
     private var gestureTimer: Timer? = nil
     private var gestureTimerStart: Date? = nil
     private var gestureTimerDuration: TimeInterval = 0
-    private var gestureWaitingFor: String? = nil
 
     private func flashTorch(duration: TimeInterval) {
         // Turn on torch
@@ -248,6 +252,7 @@ class CameraManager: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleB
                     self.handBoundingBox = nil
                     self.handLandmarks = []
                     self.currentGesture = nil
+                    self.currentGestureName = nil
                     self.resetGestureTimers()
                 }
                 return
@@ -259,6 +264,7 @@ class CameraManager: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleB
                     self.handBoundingBox = nil
                     self.handLandmarks = []
                     self.currentGesture = nil
+                    self.currentGestureName = nil
                     self.resetGestureTimers()
                 }
                 return
@@ -310,6 +316,7 @@ class CameraManager: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleB
                     self.processGestureWithTiming(gesture)
                 } else {
                     self.currentGesture = nil
+                    self.currentGestureName = nil
                     self.resetGestureTimers()
                 }
             }
@@ -337,8 +344,8 @@ class CameraManager: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleB
         }
     }
 
-    // Classify gesture into "peace", "open", "fist" or nil
-    private func classifyGesture(observation: VNHumanHandPoseObservation) -> String? {
+    // Classify gesture into HandGesture enum or nil
+    private func classifyGesture(observation: VNHumanHandPoseObservation) -> HandGesture? {
         do {
             let thumbTip = try observation.recognizedPoint(.thumbTip)
             let indexTip = try observation.recognizedPoint(.indexTip)
@@ -371,17 +378,17 @@ class CameraManager: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleB
             let ringExt = isExtended(ringDist)
             let littleExt = isExtended(littleDist)
 
-            // peace: index and middle extended only (Changed: other fingers no longer matter)
+            //ちょき　判定ではピース
             if indexExt && middleExt {
-                return "peace"
+                return .peace
             }
-            // open (palm): all extended
+            //パー
             if thumbExt && indexExt && middleExt && ringExt && littleExt {
-                return "open"
+                return .open
             }
-            // fist: all not extended
+            //ぐー
             if !thumbExt && !indexExt && !middleExt && !ringExt && !littleExt {
-                return "fist"
+                return .fist
             }
             return nil
         } catch {
@@ -390,25 +397,25 @@ class CameraManager: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleB
     }
 
     // Process gesture with timer-based hold detection
-    private func processGestureWithTiming(_ gesture: String) {
+    private func processGestureWithTiming(_ gesture: HandGesture) {
         // If a different gesture is detected while a timer is running, reset
-        if gestureWaitingFor != gesture {
-            if gesture == "peace" {
+        if currentGesture != gesture {
+            if gesture == .peace {
                 print("🟣 ピースを検知しました（初検出）")
             }
             print("🟣 ピース検知: timerPurposeセット前: \(String(describing: timerPurpose))")
             resetGestureTimers()
-            gestureWaitingFor = gesture
+            currentGesture = gesture
             gestureTimerStart = Date()
             switch gesture {
-            case "peace":
+            case .peace:
                 DispatchQueue.main.async {
                     self.timerPurpose = .gestureHold
                     self.timerCount = 3
                     self.gestureTimerDuration = 3.0
                 }
                 print("🟣 ピース検知: timerPurpose直後: \(String(describing: timerPurpose)), timerCount: \(timerCount)")
-            case "open":
+            case .open:
                 DispatchQueue.main.async {
                     self.timerPurpose = .gestureHold
                     self.timerCount = 3
@@ -419,17 +426,16 @@ class CameraManager: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleB
             }
         }
 
-        currentGesture = {
+        currentGestureName = {
             switch gesture {
-            case "peace": return "ピース"
-            case "open": return "パー"
-            case "fist": return "グー"
-            default: return nil
+            case .peace: return "ピース"
+            case .open: return "パー"
+            case .fist: return "グー"
             }
         }()
 
         // If gesture is fist and recording is active, stop recording immediately
-        if gesture == "fist" && isRecording {
+        if gesture == .fist && isRecording {
             isRecording = false
             print("録画停止")
             resetGestureTimers()
@@ -438,38 +444,43 @@ class CameraManager: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleB
         }
 
         // If gesture is open and not recording, start recording immediately after hold
-        if (gesture == "open" || gesture == "peace") {
+        if (gesture == .open || gesture == .peace) {
             if gestureTimer == nil {
                 // Start timer to wait gestureTimerDuration seconds
                 gestureTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] timer in
-                    guard let self = self,
-                          let start = self.gestureTimerStart else {
+                    guard let self = self else{
                         timer.invalidate()
                         return
                     }
-                    let elapsed = Date().timeIntervalSince(start)
-                    let remaining = Int(ceil(self.gestureTimerDuration - elapsed))
-                    // Removed print statement here as per instruction
-                    DispatchQueue.main.async {
-                        self.timerCount = max(0, remaining)
-                    }
-                    if elapsed >= self.gestureTimerDuration {
-                        timer.invalidate()
-                        print("🟣 gestureTimer invalidated: elapsed=\(elapsed), timerPurpose=\(String(describing: self.timerPurpose))")
+                    Task { @MainActor in
+                        guard let start = self.gestureTimerStart else {
+                            timer.invalidate()
+                            return
+                        }
+                        let elapsed = Date().timeIntervalSince(start)
+                        let remaining = Int(ceil(self.gestureTimerDuration - elapsed))
+                        // Removed print statement here as per instruction
                         DispatchQueue.main.async {
-                            self.timerPurpose = nil
+                            self.timerCount = max(0, remaining)
                         }
-
-                        if gesture == "peace" {
-                            print("ピース判定でシャッターを切ります")
-                            self.startCaptureCountdown()
-                        } else if gesture == "open" {
-                            if !self.isRecording {
-                                self.isRecording = true
-                                print("録画開始")
+                        if elapsed >= self.gestureTimerDuration {
+                            timer.invalidate()
+                            print("🟣 gestureTimer invalidated: elapsed=\(elapsed), timerPurpose=\(String(describing: self.timerPurpose))")
+                            DispatchQueue.main.async {
+                                self.timerPurpose = nil
                             }
+                            
+                            if gesture == .peace {
+                                print("ピース判定でシャッターを切ります")
+                                self.startCaptureCountdown()
+                            } else if gesture == .open {
+                                if !self.isRecording {
+                                    self.isRecording = true
+                                    print("録画開始")
+                                }
+                            }
+                            self.resetGestureTimers()
                         }
-                        self.resetGestureTimers()
                     }
                 }
             }
@@ -480,7 +491,6 @@ class CameraManager: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleB
         gestureTimer?.invalidate()
         gestureTimer = nil
         gestureTimerStart = nil
-        gestureWaitingFor = nil
         timerPurpose = nil
         timerCount = 3
     }
