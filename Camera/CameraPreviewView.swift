@@ -38,7 +38,7 @@ struct CameraPreviewView: View {
             
             // カメラ画面中央上部にcurrentGesture表示
             if let gesture = cameraManager.currentGesture {
-                Text(gesture)
+                Text(gesture.rawValue)
                     .font(.system(size: 36, weight: .bold))
                     .foregroundColor(.white)
                     .shadow(radius: 4)
