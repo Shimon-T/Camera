@@ -19,26 +19,10 @@ struct CameraPreviewView: View {
             // カメラ映像の表示 with hand landmarks overlay
             CameraView(session: cameraManager.session)
                 .ignoresSafeArea()
-                .overlay(
-                    GeometryReader { geo in
-                        ZStack {
-                            ForEach(cameraManager.handLandmarks.indices, id: \.self) { index in
-                                let point = cameraManager.handLandmarks[index]
-                                Circle()
-                                    .fill(Color.red)
-                                    .frame(width: 10, height: 10)
-                                    .position(
-                                        x: point.x * geo.size.width,
-                                        y: (1 - point.y) * geo.size.height
-                                    )
-                            }
-                        }
-                    }
-                )
             
             // カメラ画面中央上部にcurrentGesture表示
             if let gesture = cameraManager.currentGesture {
-                Text(gesture)
+                Text(gesture.rawValue)
                     .font(.system(size: 36, weight: .bold))
                     .foregroundColor(.white)
                     .shadow(radius: 4)
@@ -140,3 +124,4 @@ struct CameraPreviewView: View {
         }
     }
 }
+
