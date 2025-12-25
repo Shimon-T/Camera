@@ -1,32 +1,50 @@
-//
-//  TimerOverlayView.swift
-//  Camera
-//
-//  Created by 田中志門 on 7/12/25.
-//
-
 import SwiftUI
 
 struct TimerOverlayView: View {
-    let timeRemaining: Int
+    let isPresented: Bool
+    let message: String
+    let progress: Double
 
     var body: some View {
-        GeometryReader { geometry in
-            ZStack {
-                Color.black.opacity(0.4)
-                    .frame(width: geometry.size.width, height: geometry.size.height)
-                    .edgesIgnoringSafeArea(.all)
+        if isPresented {
+            VStack(spacing: 20) {
+                Text(message)
+                    .font(.title)
+                    .multilineTextAlignment(.center)
 
-                Text("\(timeRemaining)")
-                    .font(.system(size: 100, weight: .bold))
-                    .foregroundColor(.white)
-                    .padding()
-                    .background(Color.black.opacity(0.6))
-                    .clipShape(Circle())
-                    .shadow(radius: 10)
-                    .position(x: geometry.size.width / 2, y: geometry.size.height / 2)
+                // カウントダウンの数字アニメーション
+                CountdownNumberView()
+
+                ProgressView(value: progress)
+                    .progressViewStyle(LinearProgressViewStyle())
+                    .padding(.horizontal)
             }
-            .zIndex(999)
+            .padding(40)
+            .background(Color.white)
+            .cornerRadius(20)
+            .shadow(radius: 10)
         }
+    }
+}
+
+// カウントダウンの数字アニメーション
+struct CountdownNumberView: View {
+    
+    
+    @State private var number: Int = 3
+
+    var body: some View {
+        Text("\(number)")
+            .font(.system(size: 64, weight: .bold))
+            .foregroundColor(.red)
+            .onAppear {
+                Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { timer in
+                    if number > 0 {
+                        number -= 1
+                    } else {
+                        timer.invalidate()
+                    }
+                }
+            }
     }
 }

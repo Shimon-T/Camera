@@ -1,16 +1,11 @@
-//
-//  ContentView.swift
-//  Camera
-//
-//  Created by 田中志門 on 7/12/25.
-//
-
 import SwiftUI
 
 struct ContentView: View {
+    // CameraManagerの状態を親Viewから渡す
+    @StateObject var cameraManager = CameraManager()
+    
     var body: some View {
-//        TimerTestView()
-        let cameraManager = CameraManager()
         CameraPreviewView(cameraManager: cameraManager)
     }
 }
+
